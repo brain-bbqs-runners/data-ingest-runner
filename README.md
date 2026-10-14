@@ -1,6 +1,6 @@
-# Data ingest runner
+# Data Ingest (Runner)
 
-Self-hosted runner for https://github.com/brain-bbqs/data-ingest-task-force operations.
+Runner for the BBQS [Data Ingest Task Force](https://github.com/brain-bbqs/data-ingest-task-force).
 
 Two workflows run on this runner, named after how they're triggered: **Scheduled Ingest** (`.github/workflows/scheduled_ingest.yml`, the daily cron) and **Manual Ingest** (`.github/workflows/manual_ingest.yml`, on-demand from the Actions tab, with `dry_run`/`only`/`task_force_ref` inputs). Both are thin trigger wrappers around the reusable `.github/workflows/ingest.yml`, which holds the actual job; they share a `concurrency` group, so a manual run and a scheduled run never ingest at the same time.
 
