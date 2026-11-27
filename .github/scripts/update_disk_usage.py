@@ -32,8 +32,21 @@ BRANCH = "disk-usage"
 CSV_NAME = "disk-usage.csv"
 SVG_NAME = "disk-usage.svg"
 # Where earlier versions committed these on the records branch itself.
-LEGACY_PATHS = ("disk-usage/disk-usage.csv", "disk-usage/disk-usage.svg", "disk-usage.csv", "disk-usage.svg")
-FIELDS = ("timestamp_utc", "filesystem", "mount", "size_bytes", "used_bytes", "avail_bytes", "use_percent")
+LEGACY_PATHS = (
+    "disk-usage/disk-usage.csv",
+    "disk-usage/disk-usage.svg",
+    "disk-usage.csv",
+    "disk-usage.svg",
+)
+FIELDS = (
+    "timestamp_utc",
+    "filesystem",
+    "mount",
+    "size_bytes",
+    "used_bytes",
+    "avail_bytes",
+    "use_percent",
+)
 START, END = "<!-- runner-disk-usage:start -->", "<!-- runner-disk-usage:end -->"
 
 WIDTH, HEIGHT = 720, 290
@@ -49,7 +62,11 @@ def human(n: int, /) -> str:
         value /= 1000
     if unit == "B":
         return f"{int(value)}B"
-    text = f"{math.ceil(value * 10) / 10:.1f}{unit}" if value < 10 else f"{math.ceil(value)}{unit}"
+    text = (
+        f"{math.ceil(value * 10) / 10:.1f}{unit}"
+        if value < 10
+        else f"{math.ceil(value)}{unit}"
+    )
     return text
 
 
@@ -60,7 +77,9 @@ def measure(work_dir: Path, /) -> dict[str, str]:
         text=True,
         check=True,
     ).stdout
-    source, size, used, avail, percent, mount = output.strip().splitlines()[-1].split(None, 5)
+    source, size, used, avail, percent, mount = (
+        output.strip().splitlines()[-1].split(None, 5)
+    )
     row = {
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "filesystem": source,
@@ -73,9 +92,15 @@ def measure(work_dir: Path, /) -> dict[str, str]:
     return row
 
 
-def git(tracking: Path, /, *args: str, input: str | None = None, check: bool = True) -> str:
+def git(
+    tracking: Path, /, *args: str, input: str | None = None, check: bool = True
+) -> str:
     result = subprocess.run(
-        ["git", "-C", str(tracking), *args], input=input, capture_output=True, text=True, check=check
+        ["git", "-C", str(tracking), *args],
+        input=input,
+        capture_output=True,
+        text=True,
+        check=check,
     )
     output = result.stdout if result.returncode == 0 else ""
     return output
@@ -84,8 +109,18 @@ def git(tracking: Path, /, *args: str, input: str | None = None, check: bool = T
 def previous_csv(tracking: Path, /) -> str:
     """The history so far: the local branch (newest, if a push failed), the
     pushed branch, or the CSV an earlier version committed on HEAD."""
-    git(tracking, "fetch", "-q", "origin", f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}", check=False)
-    candidates = [f"refs/heads/{BRANCH}:{CSV_NAME}", f"refs/remotes/origin/{BRANCH}:{CSV_NAME}"]
+    git(
+        tracking,
+        "fetch",
+        "-q",
+        "origin",
+        f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}",
+        check=False,
+    )
+    candidates = [
+        f"refs/heads/{BRANCH}:{CSV_NAME}",
+        f"refs/remotes/origin/{BRANCH}:{CSV_NAME}",
+    ]
     candidates += [f"HEAD:{path}" for path in LEGACY_PATHS if path.endswith(".csv")]
     for candidate in candidates:
         text = git(tracking, "show", candidate, check=False)
@@ -94,7 +129,9 @@ def previous_csv(tracking: Path, /) -> str:
     return ""
 
 
-def append_row(previous: str, /, *, row: dict[str, str]) -> tuple[str, list[dict[str, str]]]:
+def append_row(
+    previous: str, /, *, row: dict[str, str]
+) -> tuple[str, list[dict[str, str]]]:
     rows = list(csv.DictReader(io.StringIO(previous))) if previous else []
     rows.append(row)
     buffer = io.StringIO()
@@ -107,8 +144,15 @@ def append_row(previous: str, /, *, row: dict[str, str]) -> tuple[str, list[dict
 def render_svg(*, rows: list[dict[str, str]], threshold: int) -> str:
     latest = rows[-1]
     percent = int(latest["use_percent"])
-    used, size, avail = (int(latest[key]) for key in ("used_bytes", "size_bytes", "avail_bytes"))
-    times = [datetime.strptime(r["timestamp_utc"], "%Y-%m-%dT%H:%M:%SZ") for r in rows]
+    used, size, avail = (
+        int(latest[key]) for key in ("used_bytes", "size_bytes", "avail_bytes")
+    )
+    times = [
+        datetime.strptime(r["timestamp_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        for r in rows
+    ]
     values = [int(r["use_percent"]) for r in rows]
 
     span = (times[-1] - times[0]).total_seconds() or 1.0
@@ -135,7 +179,9 @@ def render_svg(*, rows: list[dict[str, str]], threshold: int) -> str:
         f'<text class="tick" x="{PLOT_LEFT - 8}" y="{y(v) + 4:.1f}" text-anchor="end">{v}%</text>'
         for v in (0, 100)
     )
-    first_label, last_label = times[0].strftime("%Y-%m-%d"), times[-1].strftime("%Y-%m-%d")
+    first_label, last_label = times[0].strftime("%Y-%m-%d"), times[-1].strftime(
+        "%Y-%m-%d"
+    )
     x_labels = f'<text class="tick" x="{PLOT_RIGHT}" y="{PLOT_BOTTOM + 18}" text-anchor="end">{last_label}</text>'
     if len(times) > 1 and first_label != last_label:
         x_labels += f'<text class="tick" x="{PLOT_LEFT}" y="{PLOT_BOTTOM + 18}">{first_label}</text>'
@@ -194,25 +240,46 @@ def replace_branch(tracking: Path, /, *, files: dict[str, str], message: str) ->
 
 def remove_legacy_files(tracking: Path, /) -> None:
     """Take the files and README section earlier versions committed off the records branch, once."""
-    tracked = [path for path in LEGACY_PATHS if git(tracking, "ls-files", "--", path).strip()]
+    tracked = [
+        path for path in LEGACY_PATHS if git(tracking, "ls-files", "--", path).strip()
+    ]
     readme = tracking / "README.md"
     text = readme.read_text() if readme.exists() else ""
     if START in text:
         before, rest = text.split(START, 1)
         after = rest.split(END, 1)[1] if END in rest else ""
-        readme.write_text(f"{before.rstrip()}\n{after.lstrip()}" if after.strip() else f"{before.rstrip()}\n")
+        readme.write_text(
+            f"{before.rstrip()}\n{after.lstrip()}"
+            if after.strip()
+            else f"{before.rstrip()}\n"
+        )
         git(tracking, "add", "--", "README.md")
     if tracked:
         git(tracking, "rm", "-q", "--", *tracked)
     if tracked or START in text:
-        git(tracking, "commit", "-q", "-m", f"Moved runner disk usage to the {BRANCH} branch")
+        git(
+            tracking,
+            "commit",
+            "-q",
+            "-m",
+            f"Moved runner disk usage to the {BRANCH} branch",
+        )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("tracking", type=Path, help="The tracking dataset's local clone.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "tracking", type=Path, help="The tracking dataset's local clone."
+    )
     parser.add_argument("work", type=Path, help="Any path on the drive to measure.")
-    parser.add_argument("--threshold", type=int, default=50, help="Alert threshold drawn on the chart, in percent.")
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=50,
+        help="Alert threshold drawn on the chart, in percent.",
+    )
     args = parser.parse_args()
 
     row = measure(args.work)

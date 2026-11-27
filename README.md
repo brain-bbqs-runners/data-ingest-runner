@@ -1,48 +1,42 @@
 # Data Ingest (Runner)
 
-Runner for the BBQS [Data Ingest Task Force](https://github.com/brain-bbqs/data-ingest-task-force).
+Self-hosted runner for the BBQS [Data Ingest Task Force](https://github.com/brain-bbqs/data-ingest-task-force). Each run checks out that repository and runs its `dispatch/dispatch.py`, which downloads each lab's incoming dandiset, converts new sessions and uploads the standardized output.
 
-Two workflows run on this runner, named after how they're triggered: **Scheduled Ingest** (`.github/workflows/scheduled_ingest.yml`, the daily cron) and **Manual Ingest** (`.github/workflows/manual_ingest.yml`, on-demand from the Actions tab, with `dry_run`/`only`/`task_force_ref` inputs). Both are thin trigger wrappers around the reusable `.github/workflows/ingest.yml`, which holds the actual job; they share a `concurrency` group, so a manual run and a scheduled run never ingest at the same time.
+## Workflows
 
-A third, **Rebuild Runner Tools** (`.github/workflows/rebuild_tools.yml`), is maintenance only. It reinstalls the runner's tools (see Runner setup) in the same `concurrency` group. **Runner Watchdog** (`.github/workflows/runner_watchdog.yml`) runs on GitHub-hosted runners and emails when this runner goes offline (see Running it).
+- **Scheduled Ingest** (`scheduled_ingest.yml`) runs daily on its cron.
+- **Manual Ingest** (`manual_ingest.yml`) runs from the Actions tab. Its inputs are `dry_run`, `only` (a lab, or `<lab>/<project>`) and `task_force_ref` (a branch, tag or SHA of the task-force repo, `main` by default).
+- **Rebuild Runner Tools** (`rebuild_tools.yml`) reinstalls the runner's tools.
+- **Runner Watchdog** (`runner_watchdog.yml`) emails when the runner goes offline or comes back.
 
-The reusable workflow checks out [`data-ingest-task-force`](https://github.com/brain-bbqs/data-ingest-task-force) and runs its `dispatch/dispatch.py` (downloads each lab's incoming dandiset, converts new sessions, uploads the standardized outputs).
+The ingest job itself lives in the reusable `ingest.yml`. The ingest and rebuild workflows share one `concurrency` group, so they never overlap. A failed or cancelled ingest run sends an email.
 
 ## Runner setup
 
-1. Register a self-hosted runner against this repository (Settings -> Actions -> Runners -> New self-hosted runner), giving it (in addition to the default `self-hosted` label) the labels the workflow targets: `ember` and `ingest` — or edit `runs-on` in `ingest.yml` (the one place it's declared) to match whatever labels you use.
-2. On the runner host, install and configure:
-   - Python 3.10+ (`python3` on `PATH`). `dispatch.py` is the orchestrator, not a payload: it runs on the host and starts a container per step, so the host needs an interpreter for it even though nothing it drives runs here. It's standard-library-only, so there's no environment to build for it — no `pip install`, no venv.
-   - Apptainer, DataLad, and con-duct. Every external tool `dispatch.py` drives runs in an [Apptainer](https://apptainer.org) container, not directly on the runner host: `dandi download`/`dandi upload` run inside `ghcr.io/brain-bbqs/dandi-cli` (dispatch's own `--dandi-image` default), and each lab's conversion step runs inside its own registered image (e.g. [`ghcr.io/brain-bbqs/kemere-r34da059514-ingest`](https://github.com/brain-bbqs/data-ingest-task-force/pkgs/container/kemere-r34da059514-ingest)). Code and data are bind-mounted in at run time, so the runner host doesn't need the `dandi` CLI, FFmpeg, or any other lab runtime dependency installed directly. Apptainer needs no daemon and runs each container as the runner's own account, so there's no Docker socket or group to set up. The images are built as `.sif` files into the tracking dataset (see below), and each conversion and upload runs through `datalad containers-run` under [con-duct](https://github.com/con/duct), which records its logs and resource usage there. Images are pulled anonymously, so they must stay public.
-     None of this needs root. The workflow's first step installs Apptainer, git-annex, DataLad, datalad-container, and con-duct into `~/ember-tools` in the runner account's home (Apptainer and git-annex from conda-forge via [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html), the rest from PyPI), on the first real run, and reuses it after. To upgrade them, or to repair a broken install, run the **Rebuild Runner Tools** workflow from the Actions tab. It wipes `~/ember-tools`, reinstalls the latest versions, and prints what it installed. It shares the ingest workflows' concurrency group, so it never runs during an ingest. Both workflows install through `.github/scripts/setup-tools.sh`. The only host requirement is that unprivileged user namespaces are enabled, which rootless Apptainer runs containers in. They are on Ubuntu 22.04 by default. The workflow checks with `unshare --user --map-root-user true` and stops with an error if they're not, since enabling them is the one change that needs an admin.
-   - Set the `TRACKING_TOKEN` **repository secret** to a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) limited to [`brain-bbqs/data-ingest-runner-tracking`](https://github.com/brain-bbqs/data-ingest-runner-tracking), with Contents read and write. That repository is a DataLad dataset recording every image and every conversion and upload the runner performs. The workflow clones it once to `ember-tracking` (next to `ember-incoming`/`ember-standardized`), `dispatch.py` commits to it, and the workflow pushes its git history back after each run, failed runs included. The runner works on that repository's `records` branch, so `main` holds only its documentation and doesn't grow with every run. The annexed `.sif` images stay on the runner. See that repository's README for its layout.
-   - Set the `EMBER_DANDI_API_KEY` **repository secret** (Settings -> Secrets and variables -> Actions -> Secrets) to a DANDI API key for the `ember-dandi` instance. The workflow exposes it to `dispatch.py` under that same name (no rename) — dandi-cli looks credentials up per instance (upper-cased, `-` → `_`, suffixed `_API_KEY`, so `ember-dandi` needs `EMBER_DANDI_API_KEY`, not a generic `DANDI_API_KEY`), and `dispatch.py` computes that name itself and forwards it (through the environment only, never as a literal value on a command line) into every container it starts — the dandi image and, when set, a project's `container_image` too, for labs whose conversion step itself needs DANDI access. Since `dandi` only ever runs inside its container now, there's no host-side `dandi login` fallback — this secret is the only way to authenticate. A lab registered against a different `dandi_instance` needs its own correspondingly-named secret.
-   - Set the `MAIL_USERNAME` and `MAIL_PASSWORD` **repository secrets** (a Gmail address and an [app password](https://support.google.com/accounts/answer/185833) for it). Every ingest run, manual or scheduled, emails through `smtp.gmail.com` when it fails or is cancelled, and **Runner Watchdog** emails when this runner goes offline or comes back. Only those notification jobs need them. Ingest itself runs without.
-   - Set the `RUNNER_STATUS_TOKEN` **repository secret** to a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) for this repository with **Administration** read-only (to list runners) and **Variables** read and write (to remember the last state it saw). The workflow's own token can do neither. Without it the watchdog only logs a warning.
-3. Nothing else required here: `dispatch.py` always picks and creates the raw/standardized folders itself (`ember-incoming`/`ember-standardized`, siblings of its own checkout on the runner), and the workflow clones `ember-tracking` next to them on its first real run — no workflow here has a variable or input that overrides those locations.
+On a Linux host, as the account that will run the jobs, download the runner from Settings -> Actions -> Runners -> New self-hosted runner. Then, in its folder:
 
-By default dispatch reads its lab registry (`projects.json` + `sessions.json`) from the task-force checkout, so adding or editing a lab needs a commit + PR there.
-To edit the registry directly on the runner host instead — no PR needed — set two more repository variables to absolute paths on this runner:
-   - `REGISTRY_PATH` (a `projects.json`)
-   - `SESSIONS_PATH` (a `sessions.json`)
+```bash
+sudo ./bin/installdependencies.sh
+./config.sh --url https://github.com/brain-bbqs-runners/data-ingest-runner \
+    --token <REGISTRATION_TOKEN> --name <runner-name> --labels ember,ingest
+./run.sh
+```
 
-When set, dispatch reads those files instead of the repo's committed copies; leave them unset to keep the registry version-controlled in `data-ingest-task-force`.
-See `dispatch/README.md` in that repo for the file formats (and their JSON Schemas, for editor validation).
+The token is on that same settings page. To keep the runner running after logout, use `sudo ./svc.sh install && sudo ./svc.sh start` instead of `./run.sh`.
 
-## Running it
+The host needs `python3` (3.10+), `git` and `curl`. It also needs unprivileged user namespaces, so `unshare --user --map-root-user true` must succeed. Nothing else is installed by hand. The first run installs Apptainer, git-annex, DataLad, datalad-container and con-duct into `~/ember-tools`, without root.
 
-- **Scheduled Ingest** fires automatically on its `schedule:` cron (daily by default — adjust in `scheduled_ingest.yml` to match how often new sessions are expected). It takes no inputs: a scheduled run is always a full, non-dry run.
-- **Failure emails.** Every ingest run, manual or scheduled, emails when it fails or is cancelled (`NotifyOnFailure` in `ingest.yml`, on a GitHub-hosted runner, so the mail goes out even when the failure is this self-hosted runner). The mail goes out when the run ends, and a run keeps going past a project that fails.
-- **Runner Watchdog** (`.github/workflows/runner_watchdog.yml`) checks this runner every 15 minutes from a GitHub-hosted runner and emails as soon as it goes offline, and again when it is back. It mails only when the state changes, keeping the last one in the `RUNNER_WATCHDOG_STATE` repository variable, so an outage sends one alert. Without it, an offline runner only shows up when a queued run is cancelled after waiting 24 hours. GitHub runs scheduled workflows on a best-effort basis, so a check can come a few minutes late.
-- **Disk usage.** Every real run, manual or scheduled, appends the runner's work-drive usage (from `df`) to `disk-usage.csv` and redraws `disk-usage.svg`, a chart of current usage and its history that the [tracking dataset's README](https://github.com/brain-bbqs/data-ingest-runner-tracking#runner-disk-usage) embeds. Both live on the tracking repository's `disk-usage` branch, which each run replaces with a single commit and force-pushes. The CSV is the history, so the branch never accumulates commits. Scheduled runs also email the same address as the failure notice (`NotifyOnDiskUsage`) whenever the drive is at or above 50% used, repeating daily until space is freed. Set the `DISK_ALERT_PERCENT` repository variable (Settings -> Secrets and variables -> Actions -> Variables) to change the threshold.
-- **Manual Ingest** is the one to trigger by hand from the Actions tab, optionally with `dry_run: true` (log every action, touch nothing) or `only` to restrict to one project. That takes a lab name, or `<lab>/<project>` for a lab registered with a project name (e.g. `zhang/ferret-hyperscanning`). Its run title notes the lab and dry-run state, so a manual run is distinguishable from a scheduled one at a glance.
+Repository secrets:
 
-By default every run checks out `data-ingest-task-force`'s `main` branch. For debugging, override that per-run with Manual Ingest's `task_force_ref` input (a branch, tag, or SHA), or set it as a standing override via the `TASK_FORCE_REF` repository variable — the input wins if both are set, and it falls back to `main` if neither is. Don't leave `TASK_FORCE_REF` pointed at a feature branch for real (non-debugging) scheduled runs; it's meant to come back out once you're done.
+| Secret | What it is |
+| --- | --- |
+| `EMBER_DANDI_API_KEY` | DANDI API key for the `ember-dandi` instance |
+| `TRACKING_TOKEN` | Fine-grained token for [`data-ingest-runner-tracking`](https://github.com/brain-bbqs/data-ingest-runner-tracking), Contents read and write |
+| `MAIL_USERNAME`, `MAIL_PASSWORD` | Gmail address and app password for the notification emails |
+| `RUNNER_STATUS_TOKEN` | Fine-grained token for this repository, Administration read and Variables read and write, used by the watchdog |
+
+Optional repository variables are `TASK_FORCE_REF` (a standing override of the task-force ref), `DISK_ALERT_PERCENT` (the disk-usage alert threshold, 50 by default), and `REGISTRY_PATH` and `SESSIONS_PATH` (absolute paths on the runner to a `projects.json` and `sessions.json` that replace the task-force repository's copies).
 
 ## Why doesn't this repository allow pull requests from external forks?
 
-This repository uses a self-hosted runner instead of GitHub-hosted Actions runners.
-This means that external users could fork and submit a pull request that contains code modifications that might expose secrets or other hostile actions.
-While this could be mitigated through careful permissioning and approval of run triggers before accepting contributions, it is much safer overall to simply disable them.
-If you have any questions or suggestions, please raise an Issue instead.
-The repository is kept public to allow anyone to see the runtime logs of the submission process, as well as the success/failure/timestamp of the triggers.
+A pull request from a fork could run hostile code on this self-hosted runner and reach its secrets. Please raise an issue instead.
