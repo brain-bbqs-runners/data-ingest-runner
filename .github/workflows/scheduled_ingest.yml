@@ -51,4 +51,3 @@ jobs:
             The runner's work drive is at or above the ${{ vars.DISK_ALERT_PERCENT || '50' }}% alert threshold:
             ${{ needs.Ingest.outputs.disk_summary }}.
             The current table is in https://github.com/brain-bbqs/data-ingest-runner-tracking#runner-disk-usage
-
